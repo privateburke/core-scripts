@@ -1,0 +1,190 @@
+#!/bin/bash
+
+BLUE='\e[0;34m'
+LIGHTBLUE='\e[1;34m'
+RED='\e[0;31m'
+WHITE='\e[1;37m'
+NC='\e[0m'
+
+configureMachine () {
+
+echo -e ${LIGHTBLUE}
+echo "SiteSpect Post-Install System Setup"
+sleep 3s
+## REPO ADD
+echo -e ${BLUE}
+echo "";echo "Installing Needed Yum Repos"
+sleep 2s
+echo -e ${RED}
+/bin/rpm -Uvh http://yum.spacewalkproject.org/2.2-client/RHEL/6/x86_64/spacewalk-client-repo-2.2-1.el6.noarch.rpm && /usr/bin/yum install epel-release -y && rpm -ivh http://yum.puppetlabs.com/puppetlabs-release-el-6.noarch.rpm && /usr/bin/yum repolist && /usr/bin/sleep 5s
+## PACKAGE INSTALLATION
+echo -e ${BLUE}
+echo "";echo "Installing Required Packages"
+sleep 2s
+echo -e ${RED}
+/usr/bin/yum install -y rhn-client-tools rhn-check rhn-setup rhnsd m2crypto yum-rhn-plugin rhncfg* osad puppet bind-utils
+echo -e ${BLUE}
+sleep 2s
+echo "";echo "Installing SpaceWalk SSL Certificate"
+echo -e ${RED}
+/bin/rpm -Uvh http://spacewalk1.bos.sitespect.com/pub/rhn-org-trusted-ssl-cert-1.0-1.noarch.rpm
+
+echo -e ${WHITE}
+echo -ne "Enter Machine's Domain Name (e.g. eng.sitespect.com) "
+read DOMAINNAME
+read -p "Is this an Engine? [Y/N] " engine
+if [[ $engine = N ]]; then
+	TYPE=NONENGINE
+else
+	TYPE=ENGINE
+		if [[ $DOMAINNAME = eng.sitespect.com ]]; then
+	        read -p "Boston DataCenter or HeadQuarters? [BOS/HQ] " englocation
+ 			if [[ $englocation = BOS ]]; then
+        			echo -e ${BLUE}
+				echo "Determing Best Hostname to use..."
+				echo "Pease Use This Hostname";echo -e ${WHITE}
+        			for i in $(dig axfr $DOMAINNAME|grep -v hq.$DOMAINNAME|grep engine|grep -v CNAME|awk '{print $1'}|sed 's/.$//');do if ping -c 1 $i &> /dev/null ;then echo $i 1;else echo $i 0;break;fi;done|tail -1|sed 's/.$//'
+        		else
+				echo -e ${BLUE}
+				echo "Determing Best Hostname to use..."
+				echo "Please Use This Hostname";echo -e ${WHITE}
+				for i in $(dig axfr $DOMAINNAME|grep -v hq.$DOMAINNAME|grep engine|grep -v CNAME|awk '{print $1'}|sed 's/.$//');do if ping -c 1 $i &> /dev/null ;then echo $i 1;else echo $i 0;break;fi;done|tail -1|sed 's/.$//'
+			fi
+       		fi
+fi
+
+echo -e ${WHITE}
+echo -ne "Enter Hostname (NON-FQDN FORM e.g. engine001): "
+read SIMPLEHOSTNAME
+echo -ne "Enter IP Address: "
+read IPADDRESS
+echo -ne "Enter this Machine's Puppet Environment (e.g. production,eng,qa)"
+read ENVIRONMENT
+
+
+echo -e ${BLUE}
+echo "Validiation Options/Environment"
+
+## CHECK DNS RESOLUTION
+DNSCHECK=$(ping -q -c 1 puppet1.$DOMAINNAME|grep "10)"|wc -l)
+echo "";echo -e ${BLUE} "Checking if DNS is configure correctly"
+if [ $DNSCHECK -eq 1 ]
+then
+   echo -e ${WHITE}"DNS:" $(echo -e ${RED} "OK Passed");echo "";sleep 2s
+else
+   echo -e ${WHITE}"DNS:" $(echo -e ${RED} "Resolution failed - Check Nameservers");
+   exit 1
+fi
+
+## Check if HostName is Taken
+HOSTNAMECHECK=$(ping -q -c 1 $SIMPLEHOSTNAME.$DOMAINNAME|grep "100% packet loss"|wc -l)
+echo "";echo -e ${BLUE}"Checking if HostName is already taken"
+if [ $HOSTNAMECHECK -eq 1 ]
+then
+    echo -e ${WHITE}"Hostname:" $(echo -e ${RED} "is avaliable");echo "";sleep 2s
+else
+    echo -e ${RED} "Hostname Is Already in Use! Try Again."
+    configureMachine
+fi
+
+## Check if IPADDRESS is Taken
+IPADDRESSCHECK=$(ping -q -c 1 $IPADDRESS|grep "100% packet loss"|wc -l)
+echo "";echo -e ${BLUE}"Checking if IP Address is already taken"
+if [ $IPADDRESSCHECK -eq 1 ]
+then
+    echo -e ${WHITE} "IP Address:" $(echo -e ${RED} "is avaliable");echo "";sleep 2s
+else
+    echo -e ${RED} "IP Address Is Already in Use! Try Again."
+    configureMachine
+fi
+
+echo -e ${BLUE}"Eng of Testing";echo ""
+
+## Begin Configuration
+
+echo "Setting Hostname in /etc/hosts"
+#/etc/hosts
+echo -e "127.0.0.1   $SIMPLEHOSTNAME.$DOMAINNAME $SIMPLEHOSTNAME\n$(cat /etc/hosts)" > /etc/hosts
+sleep 1s
+echo "Configure Networking"
+echo -e ${RED} "Configuring /etc/sysconfig/network"
+
+#/etc/sysconfig/network
+echo "HOSTNAME=$SIMPLEHOSTNAME.$DOMAINNAME
+NETWORKING=yes
+GATEWAYDEV=em1" > /etc/sysconfig/network
+
+echo "Configuring /etc/sysconfig/network-script/ifcfg-eth0"
+
+#/etc/sysconfig/network-script/ifcfg-eth0
+echo "DEVICE=em1
+TYPE=Ethernet
+ONBOOT=yes
+NM_CONTROLLED=yes
+BOOTPROTO=none
+HWADDR=$(ifconfig|grep eth0|grep HWaddr|awk '{print $5}')
+IPADDR=$IPADDRESS
+PREFIX=16
+GATEWAY=10.$(echo $IPADDRESS|awk --field-separator="." '{print $2}').0.1
+DNS1=10.$(echo $IPADDRESS|awk --field-separator="." '{print $2}').10.100
+DNS2=10.20.10.100
+DOMAIN=$DOMAINNAME
+DEFROUTE=yes
+IPV4_FAILURE_FATAL=yes
+IPV6INIT=no
+NAME='System em1'" > /etc/sysconfig/network-scripts/ifcfg-em1
+sleep 1s
+
+#/etc/puppet/puppet.conf
+mkdir -p /etc/puppet
+rm -rf /etc/puppet/puppet.conf
+echo "Configuring Puppet"
+echo "[main] 
+    logdir = /var/log/puppet 
+    rundir = /var/run/puppet 
+    ssldir = \$vardir/ssl 
+    server = puppet
+    pluginsync = true
+   
+[agent] 
+    classfile = \$vardir/classes.txt 
+    localconfig = \$vardir/localconfig 
+    environment = $ENVIRONMENT" > /etc/puppet/puppet.conf;echo ""
+
+##Restart Machine
+
+echo -e ${BLUE} "At this time the machine needs to restart. This process will resume after the restart."
+echo "Remember that your machine is now found at $IPADDRESS"
+/sbin/shutdown -r +1
+
+exit 0
+
+}
+
+#echo -e ${BLUE}
+#echo "Registering System with SpaceWalk"
+#echo -e ${RED}
+#/usr/bin/yes | /usr/sbin/rhnreg_ks --serverUrl=http://spacewalk1.bos.sitespect.com/XMLRPC --sslCACert=/usr/share/rhn/RHN-ORG-TRUSTED-SSL-CERT --activationkey=2-145baba7f423f38741361711b714fa59
+
+## Clean Up Repos
+#/bin/rm -rf /etc/yum.repos.d/*.repo
+
+## Touch stop file
+#/bin/echo "Run completed on $(date)" > /etc/yum.repos.d/holster/req_packages_installed
+
+echo "Continue or Quit"
+options=("Continue" "Quit")
+select opt in "${options[@]}"
+do
+        case $opt in
+        "Continue")
+                configureMachine
+                ;;
+        "Quit")
+               exit 0
+                ;;
+        *)
+                echo "Invalid Option"
+                ;;
+esac
+done
